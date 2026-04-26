@@ -1,6 +1,18 @@
+import json
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import train_test_split
+
+from config import ARTIFACT_DIR
+from recommender import (
+    content_based_recommend,
+    hybrid_recommend,
+    item_based_cf_recommend,
+    svd_predict_matrix,
+    user_based_cf_recommend,
+)
 
 
 def temporal_or_random_split(ratings: pd.DataFrame, test_size: float = 0.2, random_state: int = 42):
@@ -48,3 +60,56 @@ def evaluate_ranking_for_user(recommended: list[str], test_user_df: pd.DataFrame
     p, r = precision_recall_at_k(recommended, relevant, k)
     n = ndcg_at_k(recommended, relevant, k)
     return {f"precision@{k}": p, f"recall@{k}": r, f"ndcg@{k}": n}
+
+
+def run_offline_benchmark(train_df: pd.DataFrame, test_df: pd.DataFrame, feature_artifacts, k: int = 10) -> pd.DataFrame:
+    users = sorted(set(test_df["user_id"].astype(str).tolist()))
+    rows = []
+    for algo in ["content", "user_cf", "item_cf", "hybrid"]:
+        per_user = []
+        for u in users:
+            if algo == "content":
+                recs = content_based_recommend(u, train_df, feature_artifacts, top_n=k)
+            elif algo == "user_cf":
+                recs = user_based_cf_recommend(u, train_df, top_n=k)
+            elif algo == "item_cf":
+                recs = item_based_cf_recommend(u, train_df, top_n=k)
+            else:
+                recs = hybrid_recommend(u, train_df, feature_artifacts, top_n=k)
+            user_test = test_df[test_df["user_id"].astype(str) == u]
+            if user_test.empty:
+                continue
+            metrics = evaluate_ranking_for_user([r.item_id for r in recs], user_test, k=k)
+            per_user.append(metrics)
+        if per_user:
+            rows.append(
+                {
+                    "algorithm": algo,
+                    f"precision@{k}": float(np.mean([m[f"precision@{k}"] for m in per_user])),
+                    f"recall@{k}": float(np.mean([m[f"recall@{k}"] for m in per_user])),
+                    f"ndcg@{k}": float(np.mean([m[f"ndcg@{k}"] for m in per_user])),
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def evaluate_svd_regression(train_df: pd.DataFrame, test_df: pd.DataFrame) -> dict:
+    recon, _, _ = svd_predict_matrix(train_df)
+    pairs = test_df[["user_id", "item_id", "rating"]].copy()
+    preds = []
+    actual = []
+    for _, row in pairs.iterrows():
+        u = str(row["user_id"])
+        i = str(row["item_id"])
+        if u in recon.index and i in recon.columns:
+            preds.append(float(recon.loc[u, i]))
+            actual.append(float(row["rating"]))
+    if not preds:
+        return {"rmse": None, "mae": None}
+    rmse, mae = rmse_mae(np.array(actual), np.array(preds))
+    return {"rmse": rmse, "mae": mae}
+
+
+def save_evaluation_report(report: dict, output_path: Path = ARTIFACT_DIR / "evaluation_report.json") -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(report, indent=2))
