@@ -143,8 +143,12 @@ def item_based_cf_recommend(
     rated = user_row.dropna()
     preds = {}
     for candidate in centered.columns:
+        candidate_str = str(candidate)
         if pd.notna(user_row[candidate]):
             continue
+        if artifact_items is not None and candidate_str not in artifact_items:
+            continue
+
         numer = 0.0
         denom = 0.0
         nbrs = sim.loc[candidate, rated.index].sort_values(ascending=False).head(k_neighbors)
@@ -161,7 +165,14 @@ def item_based_cf_recommend(
 def svd_predict_matrix(ratings: pd.DataFrame, n_components: int = SVD_COMPONENTS):
     uim = build_user_item_matrix(ratings)
     mat = uim.fillna(0)
-    n_comp = max(2, min(n_components, min(mat.shape) - 1))
+    min_dim = min(mat.shape)
+    if min_dim < 2:
+        recon = mat.values.astype(float)
+        u_factors = mat.values.astype(float)
+        v_factors = np.eye(mat.shape[1], dtype=float)
+        return pd.DataFrame(recon, index=mat.index, columns=mat.columns), u_factors, v_factors
+
+    n_comp = max(1, min(n_components, min_dim - 1))
     svd = TruncatedSVD(n_components=n_comp, random_state=SVD_RANDOM_STATE)
     U = svd.fit_transform(mat)
     V = svd.components_

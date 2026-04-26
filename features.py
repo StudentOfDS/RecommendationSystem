@@ -83,8 +83,18 @@ def build_item_features(items: pd.DataFrame, reviews: pd.DataFrame | None = None
     )
     pipeline = Pipeline([("preprocess", preprocess)])
     matrix = pipeline.fit_transform(df)
+    matrix_csr = matrix.tocsr() if hasattr(matrix, "tocsr") else sparse.csr_matrix(matrix)
 
-    return FeatureArtifacts(item_ids=df["item_id"].to_numpy(), feature_matrix=matrix.tocsr(), transformer=pipeline)
+    return FeatureArtifacts(item_ids=df["item_id"].to_numpy(), feature_matrix=matrix_csr, transformer=pipeline)
+
+
+def save_feature_artifacts(artifacts: FeatureArtifacts, output_path):
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    joblib.dump(artifacts, output_path)
+
+
+def load_feature_artifacts(path):
+    return joblib.load(path)
 
 
 def save_feature_artifacts(artifacts: FeatureArtifacts, output_path):
