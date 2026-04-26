@@ -90,32 +90,14 @@ def user_based_cf_recommend(
         user_idx = cf_artifacts.user_ids.index(str(user_id))
         sim_vec = pd.Series(cf_artifacts.user_similarity[user_idx], index=cf_artifacts.user_ids)
         neighbors = sim_vec.drop(str(user_id)).sort_values(ascending=False).head(k_neighbors)
-        user_rated = set(ratings[ratings["user_id"].astype(str) == str(user_id)]["item_id"].astype(str))
-        preds: dict[str, float] = {}
-
-        for item_idx, item_id in enumerate(cf_artifacts.item_ids):
-            if str(item_id) in user_rated:
-                continue
-            numer = 0.0
-            denom = 0.0
-            for nb, s in neighbors.items():
-                nb_idx = cf_artifacts.user_ids.index(str(nb))
-                r = float(cf_artifacts.user_item_matrix[nb_idx, item_idx])
-                if r != 0:
-                    numer += float(s) * r
-                    denom += abs(float(s))
-            if denom > 0:
-                preds[str(item_id)] = numer / denom
-
-        top = pd.Series(preds).sort_values(ascending=False).head(top_n)
-        return [Recommendation(iid, float(score), "users with similar tastes liked this") for iid, score in top.items()]
-
-    uim = build_user_item_matrix(ratings)
-    if str(user_id) not in uim.index:
-        return []
-    filled = uim.fillna(0)
-    sim = pd.DataFrame(cosine_similarity(filled), index=filled.index, columns=filled.index)
-    neighbors = sim.loc[str(user_id)].drop(str(user_id)).sort_values(ascending=False).head(k_neighbors)
+        uim = pd.DataFrame(cf_artifacts.user_item_matrix.toarray(), index=cf_artifacts.user_ids, columns=cf_artifacts.item_ids)
+    else:
+        uim = build_user_item_matrix(ratings)
+        if str(user_id) not in uim.index:
+            return []
+        filled = uim.fillna(0)
+        sim = pd.DataFrame(cosine_similarity(filled), index=filled.index, columns=filled.index)
+        neighbors = sim.loc[str(user_id)].drop(str(user_id)).sort_values(ascending=False).head(k_neighbors)
 
     user_rated = set(ratings[ratings["user_id"].astype(str) == str(user_id)]["item_id"].astype(str))
     preds = {}
