@@ -22,7 +22,6 @@ from evaluation import (
     temporal_or_random_split,
 )
 from features import FeatureArtifacts, build_item_features, clean_ratings, load_feature_artifacts
-from logging_utils import get_logger, log_event, timed_block
 from recommender import (
     EpsilonGreedyBandit,
     content_based_recommend,
@@ -62,21 +61,6 @@ def _load_data():
     if not ratings_df.empty:
         ratings_df = clean_ratings(ratings_df, min_user_interactions=1, min_item_interactions=1)
     return movies_df, ratings_df, reviews_df, reviews_all
-
-
-def _artifact_freshness_warning(metadata: dict, movies_df: pd.DataFrame, ratings_df: pd.DataFrame, reviews_all: pd.DataFrame) -> str | None:
-    if not metadata:
-        return "Artifact metadata missing; cannot verify freshness."
-    stale_fields = []
-    if int(metadata.get("n_movies", -1)) != len(movies_df):
-        stale_fields.append("movie count")
-    if int(metadata.get("n_ratings", -1)) != len(ratings_df):
-        stale_fields.append("rating count")
-    if int(metadata.get("n_reviews", -1)) != len(reviews_all):
-        stale_fields.append("review count")
-    if stale_fields:
-        return f"Artifacts may be stale (mismatch in: {', '.join(stale_fields)}). Re-run train.py."
-    return None
 
 
 st.sidebar.header("Ingestion")
@@ -152,11 +136,8 @@ else:
     if use_persisted and (ARTIFACT_DIR / "feature_artifacts.joblib").exists() and (ARTIFACT_DIR / "cf_artifacts.joblib").exists():
         feature_artifacts = load_feature_artifacts(ARTIFACT_DIR / "feature_artifacts.joblib")
         cf_artifacts = load_cf_artifacts(ARTIFACT_DIR / "cf_artifacts.joblib")
-        metadata = load_metadata(ARTIFACT_DIR / "metadata.json") if (ARTIFACT_DIR / "metadata.json").exists() else {}
-        st.caption(f"Loaded artifacts metadata: {metadata}")
-        freshness_warning = _artifact_freshness_warning(metadata, movies_df, ratings_df, reviews_all)
-        if freshness_warning:
-            st.warning(freshness_warning)
+        if (ARTIFACT_DIR / "metadata.json").exists():
+            st.caption(f"Loaded artifacts metadata: {load_metadata(ARTIFACT_DIR / 'metadata.json')}")
     else:
         feature_artifacts = build_feature_cache(movies_df, reviews_all)
 
@@ -169,19 +150,18 @@ else:
     k_neighbors = st.slider("K neighbors", min_value=5, max_value=80, value=K_NEIGHBORS_DEFAULT)
 
     if st.button("Generate recommendations"):
-        with timed_block(logger, "generate_recommendations", algo=algo, user=rec_user, top_n=top_n):
-            if algo == "hybrid":
-                recs = hybrid_recommend(rec_user, ratings_df, feature_artifacts, top_n=top_n, alpha=alpha, cf_artifacts=cf_artifacts)
-            elif algo == "content":
-                recs = content_based_recommend(rec_user, ratings_df, feature_artifacts, top_n=top_n)
-            elif algo == "user_cf":
-                recs = user_based_cf_recommend(rec_user, ratings_df, top_n=top_n, k_neighbors=k_neighbors, cf_artifacts=cf_artifacts)
-            elif algo == "item_cf":
-                recs = item_based_cf_recommend(rec_user, ratings_df, top_n=top_n, k_neighbors=k_neighbors, cf_artifacts=cf_artifacts)
-            elif algo == "svd":
-                recs = svd_recommend(rec_user, ratings_df, top_n=top_n, cf_artifacts=cf_artifacts)
-            else:
-                recs = popularity_fallback(ratings_df, top_n=top_n)
+        if algo == "hybrid":
+            recs = hybrid_recommend(rec_user, ratings_df, feature_artifacts, top_n=top_n, alpha=alpha, cf_artifacts=cf_artifacts)
+        elif algo == "content":
+            recs = content_based_recommend(rec_user, ratings_df, feature_artifacts, top_n=top_n)
+        elif algo == "user_cf":
+            recs = user_based_cf_recommend(rec_user, ratings_df, top_n=top_n, k_neighbors=k_neighbors, cf_artifacts=cf_artifacts)
+        elif algo == "item_cf":
+            recs = item_based_cf_recommend(rec_user, ratings_df, top_n=top_n, k_neighbors=k_neighbors, cf_artifacts=cf_artifacts)
+        elif algo == "svd":
+            recs = svd_recommend(rec_user, ratings_df, top_n=top_n, cf_artifacts=cf_artifacts)
+        else:
+            recs = popularity_fallback(ratings_df, top_n=top_n)
 
         recs = bandit.rerank(rec_user, recs)
         out = pd.DataFrame([{"item_id": r.item_id, "score": r.score, "reason": r.reason} for r in recs])
@@ -195,13 +175,12 @@ else:
 
 with st.expander("Offline Evaluation"):
     if st.button("Run full benchmark") and not ratings_df.empty and not movies_df.empty:
-        with timed_block(logger, "offline_benchmark"):
-            f_art = build_feature_cache(movies_df, reviews_all)
-            tr, te = temporal_or_random_split(ratings_df, test_size=0.2)
-            bench_df = run_offline_benchmark(tr, te, f_art, k=10)
-            svd_metrics = evaluate_svd_regression(tr, te)
-            report = {"ranking": bench_df.to_dict(orient="records"), "svd": svd_metrics}
-            save_evaluation_report(report)
+        f_art = build_feature_cache(movies_df, reviews_all)
+        tr, te = temporal_or_random_split(ratings_df, test_size=0.2)
+        bench_df = run_offline_benchmark(tr, te, f_art, k=10)
+        svd_metrics = evaluate_svd_regression(tr, te)
+        report = {"ranking": bench_df.to_dict(orient="records"), "svd": svd_metrics}
+        save_evaluation_report(report)
         st.dataframe(bench_df, use_container_width=True)
         st.write("SVD RMSE/MAE", svd_metrics)
         st.success("Saved report to artifacts/evaluation_report.json")
