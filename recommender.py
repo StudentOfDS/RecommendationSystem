@@ -9,6 +9,7 @@ from scipy.sparse import csr_matrix
 from sklearn.decomposition import TruncatedSVD
 from sklearn.metrics.pairwise import cosine_similarity
 
+from artifacts import CFArtifacts
 from config import (
     ALPHA_HYBRID_DEFAULT,
     BANDIT_REWARD_MAX,
@@ -17,6 +18,9 @@ from config import (
     COLLAB_WEIGHTS,
     EPSILON,
     K_NEIGHBORS_DEFAULT,
+    RATING_SCALE_MAX,
+    RATING_SCALE_MIN,
+    SIMILARITY_METRIC,
     SVD_COMPONENTS,
     SVD_RANDOM_STATE,
 )
@@ -56,12 +60,56 @@ def content_based_recommend(
     scores = _exclude_consumed(ratings, user_id, scores)
     top = scores.sort_values(ascending=False).head(top_n)
     return [
-        Recommendation(str(iid), float(score), "similar in content/genre/tags to your liked items")
+        Recommendation(str(iid), float(score), "similar in content/genre/tags/reviews to your liked items")
         for iid, score in top.items()
     ]
 
 
-def user_based_cf_recommend(user_id: str, ratings: pd.DataFrame, k_neighbors: int = K_NEIGHBORS_DEFAULT, top_n: int = 10):
+def _normalize_item_vector(vec: pd.Series) -> pd.Series:
+    mu = vec.mean()
+    denom = max(1e-9, RATING_SCALE_MAX - RATING_SCALE_MIN)
+    return (vec - mu) / denom
+
+
+def _item_similarity(item_mat: pd.DataFrame, metric: str) -> pd.DataFrame:
+    if metric == "pearson":
+        return item_mat.T.corr(method="pearson").fillna(0.0)
+    return pd.DataFrame(cosine_similarity(item_mat), index=item_mat.index, columns=item_mat.index)
+
+
+def user_based_cf_recommend(
+    user_id: str,
+    ratings: pd.DataFrame,
+    k_neighbors: int = K_NEIGHBORS_DEFAULT,
+    top_n: int = 10,
+    cf_artifacts: CFArtifacts | None = None,
+):
+    if cf_artifacts is not None:
+        if str(user_id) not in cf_artifacts.user_ids:
+            return []
+        user_idx = cf_artifacts.user_ids.index(str(user_id))
+        sim_vec = pd.Series(cf_artifacts.user_similarity[user_idx], index=cf_artifacts.user_ids)
+        neighbors = sim_vec.drop(str(user_id)).sort_values(ascending=False).head(k_neighbors)
+        user_rated = set(ratings[ratings["user_id"].astype(str) == str(user_id)]["item_id"].astype(str))
+        preds: dict[str, float] = {}
+
+        for item_idx, item_id in enumerate(cf_artifacts.item_ids):
+            if str(item_id) in user_rated:
+                continue
+            numer = 0.0
+            denom = 0.0
+            for nb, s in neighbors.items():
+                nb_idx = cf_artifacts.user_ids.index(str(nb))
+                r = float(cf_artifacts.user_item_matrix[nb_idx, item_idx])
+                if r != 0:
+                    numer += float(s) * r
+                    denom += abs(float(s))
+            if denom > 0:
+                preds[str(item_id)] = numer / denom
+
+        top = pd.Series(preds).sort_values(ascending=False).head(top_n)
+        return [Recommendation(iid, float(score), "users with similar tastes liked this") for iid, score in top.items()]
+
     uim = build_user_item_matrix(ratings)
     if str(user_id) not in uim.index:
         return []
@@ -88,14 +136,26 @@ def user_based_cf_recommend(user_id: str, ratings: pd.DataFrame, k_neighbors: in
     return [Recommendation(iid, float(score), "users with similar tastes liked this") for iid, score in top.items()]
 
 
-def item_based_cf_recommend(user_id: str, ratings: pd.DataFrame, k_neighbors: int = K_NEIGHBORS_DEFAULT, top_n: int = 10):
+def item_based_cf_recommend(
+    user_id: str,
+    ratings: pd.DataFrame,
+    k_neighbors: int = K_NEIGHBORS_DEFAULT,
+    top_n: int = 10,
+    metric: str = SIMILARITY_METRIC,
+    cf_artifacts: CFArtifacts | None = None,
+):
     uim = build_user_item_matrix(ratings)
     if str(user_id) not in uim.index:
         return []
 
-    centered = uim - 2.5
-    item_mat = centered.T.fillna(0)
-    sim = pd.DataFrame(cosine_similarity(item_mat), index=item_mat.index, columns=item_mat.index)
+    centered = uim.apply(_normalize_item_vector, axis=0)
+    sparse_mat = csr_matrix(centered.fillna(0).values)
+
+    if cf_artifacts is not None:
+        sim = pd.DataFrame(cf_artifacts.item_similarity, index=cf_artifacts.item_ids, columns=cf_artifacts.item_ids)
+    else:
+        item_mat = pd.DataFrame(sparse_mat.T.toarray(), index=centered.columns, columns=centered.index)
+        sim = _item_similarity(item_mat, metric)
 
     user_row = centered.loc[str(user_id)]
     rated = user_row.dropna()
@@ -105,39 +165,55 @@ def item_based_cf_recommend(user_id: str, ratings: pd.DataFrame, k_neighbors: in
             continue
         numer = 0.0
         denom = 0.0
-        for item, rating in rated.items():
-            s = sim.loc[candidate, item]
-            numer += s * float(rating)
+        nbrs = sim.loc[candidate, rated.index].sort_values(ascending=False).head(k_neighbors)
+        for item, s in nbrs.items():
+            numer += float(s) * float(rated[item])
             denom += abs(float(s))
         if denom > 0:
-            preds[str(candidate)] = 2.5 + (numer / denom)
+            preds[str(candidate)] = float(ratings["rating"].mean()) + (numer / denom)
 
     top = pd.Series(preds).sort_values(ascending=False).head(top_n)
-    return [Recommendation(iid, float(score), "similar items to the ones you rated highly") for iid, score in top.items()]
+    return [Recommendation(iid, float(score), f"similar items using {metric} similarity") for iid, score in top.items()]
 
 
-def svd_recommend(user_id: str, ratings: pd.DataFrame, top_n: int = 10, n_components: int = SVD_COMPONENTS):
+def svd_predict_matrix(ratings: pd.DataFrame, n_components: int = SVD_COMPONENTS):
     uim = build_user_item_matrix(ratings)
-    if str(user_id) not in uim.index:
-        return []
-
     mat = uim.fillna(0)
     n_comp = max(2, min(n_components, min(mat.shape) - 1))
     svd = TruncatedSVD(n_components=n_comp, random_state=SVD_RANDOM_STATE)
     U = svd.fit_transform(mat)
     V = svd.components_
     recon = np.dot(U, V)
-    recon_df = pd.DataFrame(recon, index=mat.index, columns=mat.columns)
+    return pd.DataFrame(recon, index=mat.index, columns=mat.columns), U, V
 
-    scores = recon_df.loc[str(user_id)]
+
+def svd_recommend(
+    user_id: str,
+    ratings: pd.DataFrame,
+    top_n: int = 10,
+    n_components: int = SVD_COMPONENTS,
+    cf_artifacts: CFArtifacts | None = None,
+):
+    uim = build_user_item_matrix(ratings)
+    if str(user_id) not in uim.index:
+        return []
+
+    if cf_artifacts is not None and str(user_id) in cf_artifacts.user_ids:
+        uidx = cf_artifacts.user_ids.index(str(user_id))
+        recon_row = np.dot(cf_artifacts.svd_user_factors[uidx], cf_artifacts.svd_item_factors)
+        scores = pd.Series(recon_row, index=cf_artifacts.item_ids)
+    else:
+        recon_df, _, _ = svd_predict_matrix(ratings, n_components=n_components)
+        scores = recon_df.loc[str(user_id)]
+
     scores = _exclude_consumed(ratings, user_id, scores)
     top = scores.sort_values(ascending=False).head(top_n)
     return [Recommendation(str(iid), float(score), "latent factor match from matrix factorization") for iid, score in top.items()]
 
 
 def _blend_recs(rec_lists: dict[str, list[Recommendation]], top_n: int) -> list[Recommendation]:
-    combined = {}
-    reasons = {}
+    combined: dict[str, float] = {}
+    reasons: dict[str, list[str]] = {}
     for name, recs in rec_lists.items():
         w = COLLAB_WEIGHTS.get(name, 0.0)
         for rec in recs:
@@ -156,13 +232,14 @@ def hybrid_recommend(
     item_features: FeatureArtifacts,
     top_n: int = 10,
     alpha: float = ALPHA_HYBRID_DEFAULT,
+    cf_artifacts: CFArtifacts | None = None,
 ):
     user_hist_len = int((ratings["user_id"].astype(str) == str(user_id)).sum())
 
     cb = content_based_recommend(user_id, ratings, item_features, top_n=top_n * 3)
-    ub = user_based_cf_recommend(user_id, ratings, top_n=top_n * 3)
-    ib = item_based_cf_recommend(user_id, ratings, top_n=top_n * 3)
-    svd = svd_recommend(user_id, ratings, top_n=top_n * 3)
+    ub = user_based_cf_recommend(user_id, ratings, top_n=top_n * 3, cf_artifacts=cf_artifacts)
+    ib = item_based_cf_recommend(user_id, ratings, top_n=top_n * 3, cf_artifacts=cf_artifacts)
+    svd = svd_recommend(user_id, ratings, top_n=top_n * 3, cf_artifacts=cf_artifacts)
 
     if user_hist_len < 3:
         alpha = min(alpha, 0.3)
@@ -177,14 +254,12 @@ def hybrid_recommend(
         c_score = collab_map.get(iid, 0.0)
         b_score = cb_map.get(iid, 0.0)
         final = alpha * c_score + (1 - alpha) * b_score
-        reason = "hybrid of collaborative and content models"
-        scored.append(Recommendation(iid, float(final), reason))
+        scored.append(Recommendation(iid, float(final), "hybrid of collaborative and content models"))
 
     if not scored:
         return popularity_fallback(ratings, top_n=top_n)
 
-    ranked = sorted(scored, key=lambda r: r.score, reverse=True)[:top_n]
-    return ranked
+    return sorted(scored, key=lambda r: r.score, reverse=True)[:top_n]
 
 
 class EpsilonGreedyBandit:
@@ -199,7 +274,7 @@ class EpsilonGreedyBandit:
     def _load_state(self, user_id: str) -> dict:
         file = self._user_file(user_id)
         if not file.exists():
-            return {"counts": {}, "means": {}}
+            return {"counts": {}, "means": {}, "impressions": {}}
         return json.loads(file.read_text())
 
     def _save_state(self, user_id: str, state: dict):
@@ -208,6 +283,11 @@ class EpsilonGreedyBandit:
     def rating_to_reward(self, rating: float, min_rating: float = 0.5, max_rating: float = 5.0) -> float:
         reward = (rating - min_rating) / (max_rating - min_rating)
         return float(max(BANDIT_REWARD_MIN, min(BANDIT_REWARD_MAX, reward)))
+
+    def log_impression(self, user_id: str, item_id: str) -> None:
+        state = self._load_state(user_id)
+        state.setdefault("impressions", {})[item_id] = int(state.get("impressions", {}).get(item_id, 0)) + 1
+        self._save_state(user_id, state)
 
     def update(self, user_id: str, item_id: str, reward: float) -> None:
         state = self._load_state(user_id)
@@ -228,6 +308,9 @@ class EpsilonGreedyBandit:
             return []
         state = self._load_state(user_id)
         means = state.get("means", {})
+
+        for rec in candidates:
+            self.log_impression(user_id, rec.item_id)
 
         if random.random() < self.epsilon:
             shuffled = candidates[:]
