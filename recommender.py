@@ -90,32 +90,14 @@ def user_based_cf_recommend(
         user_idx = cf_artifacts.user_ids.index(str(user_id))
         sim_vec = pd.Series(cf_artifacts.user_similarity[user_idx], index=cf_artifacts.user_ids)
         neighbors = sim_vec.drop(str(user_id)).sort_values(ascending=False).head(k_neighbors)
-        user_rated = set(ratings[ratings["user_id"].astype(str) == str(user_id)]["item_id"].astype(str))
-        preds: dict[str, float] = {}
-
-        for item_idx, item_id in enumerate(cf_artifacts.item_ids):
-            if str(item_id) in user_rated:
-                continue
-            numer = 0.0
-            denom = 0.0
-            for nb, s in neighbors.items():
-                nb_idx = cf_artifacts.user_ids.index(str(nb))
-                r = float(cf_artifacts.user_item_matrix[nb_idx, item_idx])
-                if r != 0:
-                    numer += float(s) * r
-                    denom += abs(float(s))
-            if denom > 0:
-                preds[str(item_id)] = numer / denom
-
-        top = pd.Series(preds).sort_values(ascending=False).head(top_n)
-        return [Recommendation(iid, float(score), "users with similar tastes liked this") for iid, score in top.items()]
-
-    uim = build_user_item_matrix(ratings)
-    if str(user_id) not in uim.index:
-        return []
-    filled = uim.fillna(0)
-    sim = pd.DataFrame(cosine_similarity(filled), index=filled.index, columns=filled.index)
-    neighbors = sim.loc[str(user_id)].drop(str(user_id)).sort_values(ascending=False).head(k_neighbors)
+        uim = pd.DataFrame(cf_artifacts.user_item_matrix.toarray(), index=cf_artifacts.user_ids, columns=cf_artifacts.item_ids)
+    else:
+        uim = build_user_item_matrix(ratings)
+        if str(user_id) not in uim.index:
+            return []
+        filled = uim.fillna(0)
+        sim = pd.DataFrame(cosine_similarity(filled), index=filled.index, columns=filled.index)
+        neighbors = sim.loc[str(user_id)].drop(str(user_id)).sort_values(ascending=False).head(k_neighbors)
 
     user_rated = set(ratings[ratings["user_id"].astype(str) == str(user_id)]["item_id"].astype(str))
     preds = {}
@@ -151,10 +133,8 @@ def item_based_cf_recommend(
     centered = uim.apply(_normalize_item_vector, axis=0)
     sparse_mat = csr_matrix(centered.fillna(0).values)
 
-    artifact_items: set[str] | None = None
     if cf_artifacts is not None:
         sim = pd.DataFrame(cf_artifacts.item_similarity, index=cf_artifacts.item_ids, columns=cf_artifacts.item_ids)
-        artifact_items = set(str(i) for i in cf_artifacts.item_ids)
     else:
         item_mat = pd.DataFrame(sparse_mat.T.toarray(), index=centered.columns, columns=centered.index)
         sim = _item_similarity(item_mat, metric)
@@ -171,22 +151,12 @@ def item_based_cf_recommend(
 
         numer = 0.0
         denom = 0.0
-        if artifact_items is not None:
-            known_rated = [str(item) for item in rated.index if str(item) in artifact_items]
-            if not known_rated:
-                continue
-            nbrs = sim.loc[candidate_str, known_rated].sort_values(ascending=False).head(k_neighbors)
-            for item, s in nbrs.items():
-                numer += float(s) * float(rated[str(item)])
-                denom += abs(float(s))
-        else:
-            nbrs = sim.loc[candidate, rated.index].sort_values(ascending=False).head(k_neighbors)
-            for item, s in nbrs.items():
-                numer += float(s) * float(rated[item])
-                denom += abs(float(s))
-
+        nbrs = sim.loc[candidate, rated.index].sort_values(ascending=False).head(k_neighbors)
+        for item, s in nbrs.items():
+            numer += float(s) * float(rated[item])
+            denom += abs(float(s))
         if denom > 0:
-            preds[candidate_str] = float(ratings["rating"].mean()) + (numer / denom)
+            preds[str(candidate)] = float(ratings["rating"].mean()) + (numer / denom)
 
     top = pd.Series(preds).sort_values(ascending=False).head(top_n)
     return [Recommendation(iid, float(score), f"similar items using {metric} similarity") for iid, score in top.items()]

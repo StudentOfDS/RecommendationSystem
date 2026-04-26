@@ -48,27 +48,16 @@ def build_user_item_matrix(ratings: pd.DataFrame) -> pd.DataFrame:
     return ratings.pivot_table(index="user_id", columns="item_id", values="rating", aggfunc="mean")
 
 
-def _simple_sentiment(text: str) -> float:
-    tokens = [t.strip(".,!?;:\"'()[]").lower() for t in str(text).split()]
-    if not tokens:
-        return 0.0
-    pos = sum(1 for t in tokens if t in POSITIVE_WORDS)
-    neg = sum(1 for t in tokens if t in NEGATIVE_WORDS)
-    return (pos - neg) / max(1, len(tokens))
-
-
 def merge_review_texts(items: pd.DataFrame, reviews: pd.DataFrame | None = None) -> pd.DataFrame:
     df = items.copy()
     if reviews is None or reviews.empty or "review_text" not in reviews.columns:
         df["review_corpus"] = ""
-        df["review_sentiment"] = 0.0
         return df
     temp = reviews.copy()
     temp["item_id"] = temp["item_id"].astype(str)
     grouped = temp.groupby("item_id")["review_text"].apply(lambda s: " ".join(s.astype(str).tolist())).rename("review_corpus")
-    sent = temp.assign(sent=temp["review_text"].astype(str).map(_simple_sentiment)).groupby("item_id")["sent"].mean().rename("review_sentiment")
     df["item_id"] = df["item_id"].astype(str)
-    return df.merge(grouped, how="left", on="item_id").merge(sent, how="left", on="item_id").fillna({"review_corpus": "", "review_sentiment": 0.0})
+    return df.merge(grouped, how="left", on="item_id").fillna({"review_corpus": ""})
 
 
 def build_item_features(items: pd.DataFrame, reviews: pd.DataFrame | None = None) -> FeatureArtifacts:
@@ -97,6 +86,15 @@ def build_item_features(items: pd.DataFrame, reviews: pd.DataFrame | None = None
     matrix_csr = matrix.tocsr() if hasattr(matrix, "tocsr") else sparse.csr_matrix(matrix)
 
     return FeatureArtifacts(item_ids=df["item_id"].to_numpy(), feature_matrix=matrix_csr, transformer=pipeline)
+
+
+def save_feature_artifacts(artifacts: FeatureArtifacts, output_path):
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    joblib.dump(artifacts, output_path)
+
+
+def load_feature_artifacts(path):
+    return joblib.load(path)
 
 
 def save_feature_artifacts(artifacts: FeatureArtifacts, output_path):
