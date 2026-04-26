@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pandas as pd
 import streamlit as st
 
@@ -30,6 +32,9 @@ from recommender import (
     user_based_cf_recommend,
 )
 from scraper import scrape_generic_reviews
+from train import main as run_training
+
+logger = get_logger("app")
 
 st.set_page_config(page_title="Recommendation Platform", layout="wide")
 st.title("🎬 End-to-End Movie Recommendation & Review Platform")
@@ -59,6 +64,11 @@ def _load_data():
 
 
 st.sidebar.header("Ingestion")
+if st.sidebar.button("Build artifacts now"):
+    with timed_block(logger, "train_artifacts"):
+        run_training(Path(ARTIFACT_DIR))
+    st.sidebar.success("Artifacts built in artifacts/")
+
 ratings_upload = st.sidebar.file_uploader("Upload ratings CSV (user_id,item_id,rating,timestamp optional)", type=["csv"])
 items_upload = st.sidebar.file_uploader("Upload movies CSV (item_id,title,genres,description,tags,year)", type=["csv"])
 
@@ -106,10 +116,12 @@ with st.form("scrape_form"):
 if scrape_click:
     if scrape_item_id and scrape_url:
         try:
-            scraped = scrape_generic_reviews(scrape_item_id, scrape_url)
+            with timed_block(logger, "scrape_reviews", item_id=scrape_item_id, url=scrape_url):
+                scraped = scrape_generic_reviews(scrape_item_id, scrape_url)
             add_scraped_reviews(scraped)
             st.success(f"Saved {len(scraped)} deduplicated scraped reviews")
         except Exception as exc:  # noqa: BLE001
+            log_event(logger, "scrape_error", error=str(exc), url=scrape_url)
             st.error(f"Scraping failed: {exc}")
     else:
         st.warning("Both item_id and URL are required")

@@ -11,6 +11,9 @@ from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
 from config import MAX_TFIDF_FEATURES, TEXT_FIELDS
 
+POSITIVE_WORDS = {"great", "excellent", "amazing", "love", "good", "favorite", "best"}
+NEGATIVE_WORDS = {"bad", "boring", "awful", "hate", "worst", "poor", "terrible"}
+
 
 @dataclass
 class FeatureArtifacts:
@@ -74,7 +77,7 @@ def build_item_features(items: pd.DataFrame, reviews: pd.DataFrame | None = None
         transformers=[
             ("text", TfidfVectorizer(max_features=MAX_TFIDF_FEATURES, ngram_range=(1, 2)), "all_text"),
             ("genres", OneHotEncoder(handle_unknown="ignore"), ["genres"] if "genres" in df.columns else ["all_text"]),
-            ("num", StandardScaler(with_mean=False), ["year"]),
+            ("num", StandardScaler(with_mean=False), ["year", "review_sentiment"]),
         ],
         sparse_threshold=0.7,
     )
