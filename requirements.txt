@@ -1,7 +1,11 @@
-streamlit
 pandas
 numpy
 scikit-learn
 scipy
+streamlit
 requests
 beautifulsoup4
+joblib
+pytest
+ruff
+mypy
