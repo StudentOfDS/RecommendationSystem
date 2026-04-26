@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 
+import joblib
 import numpy as np
 import pandas as pd
 from scipy import sparse
@@ -44,14 +45,26 @@ def build_user_item_matrix(ratings: pd.DataFrame) -> pd.DataFrame:
     return ratings.pivot_table(index="user_id", columns="item_id", values="rating", aggfunc="mean")
 
 
-def build_item_features(items: pd.DataFrame) -> FeatureArtifacts:
+def merge_review_texts(items: pd.DataFrame, reviews: pd.DataFrame | None = None) -> pd.DataFrame:
     df = items.copy()
+    if reviews is None or reviews.empty or "review_text" not in reviews.columns:
+        df["review_corpus"] = ""
+        return df
+    temp = reviews.copy()
+    temp["item_id"] = temp["item_id"].astype(str)
+    grouped = temp.groupby("item_id")["review_text"].apply(lambda s: " ".join(s.astype(str).tolist())).rename("review_corpus")
+    df["item_id"] = df["item_id"].astype(str)
+    return df.merge(grouped, how="left", on="item_id").fillna({"review_corpus": ""})
+
+
+def build_item_features(items: pd.DataFrame, reviews: pd.DataFrame | None = None) -> FeatureArtifacts:
+    df = merge_review_texts(items, reviews)
     df["item_id"] = df["item_id"].astype(str)
 
     text_cols = [c for c in TEXT_FIELDS if c in df.columns]
     for c in text_cols:
         df[c] = df[c].fillna("")
-    df["all_text"] = df[text_cols].agg(" ".join, axis=1) if text_cols else ""
+    df["all_text"] = (df[text_cols].agg(" ".join, axis=1) if text_cols else "") + " " + df["review_corpus"].fillna("")
 
     if "year" not in df.columns:
         df["year"] = 0
@@ -69,6 +82,15 @@ def build_item_features(items: pd.DataFrame) -> FeatureArtifacts:
     matrix = pipeline.fit_transform(df)
 
     return FeatureArtifacts(item_ids=df["item_id"].to_numpy(), feature_matrix=matrix.tocsr(), transformer=pipeline)
+
+
+def save_feature_artifacts(artifacts: FeatureArtifacts, output_path):
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    joblib.dump(artifacts, output_path)
+
+
+def load_feature_artifacts(path):
+    return joblib.load(path)
 
 
 def build_user_profile(
