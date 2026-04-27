@@ -5,7 +5,7 @@ from typing import Iterable, Optional
 
 import pandas as pd
 
-from config import DB_PATH
+from config import DB_PATH, RATING_SCALE_MAX, RATING_SCALE_MIN
 
 
 def get_connection(db_path: Path = DB_PATH) -> sqlite3.Connection:
@@ -33,7 +33,6 @@ def init_db(db_path: Path = DB_PATH) -> None:
                 user_id TEXT PRIMARY KEY,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP
             );
-
             CREATE TABLE IF NOT EXISTS movies (
                 item_id TEXT PRIMARY KEY,
                 title TEXT,
@@ -42,7 +41,6 @@ def init_db(db_path: Path = DB_PATH) -> None:
                 tags TEXT,
                 year INTEGER
             );
-
             CREATE TABLE IF NOT EXISTS ratings (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id TEXT NOT NULL,
@@ -53,7 +51,6 @@ def init_db(db_path: Path = DB_PATH) -> None:
                 FOREIGN KEY(user_id) REFERENCES users(user_id) ON DELETE CASCADE,
                 FOREIGN KEY(item_id) REFERENCES movies(item_id) ON DELETE CASCADE
             );
-
             CREATE TABLE IF NOT EXISTS reviews (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id TEXT,
@@ -64,7 +61,6 @@ def init_db(db_path: Path = DB_PATH) -> None:
                 FOREIGN KEY(user_id) REFERENCES users(user_id) ON DELETE SET NULL,
                 FOREIGN KEY(item_id) REFERENCES movies(item_id) ON DELETE SET NULL
             );
-
             CREATE TABLE IF NOT EXISTS scraped_reviews (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 item_id TEXT,
@@ -82,15 +78,33 @@ def init_db(db_path: Path = DB_PATH) -> None:
 
 def upsert_users(user_ids: Iterable[str]) -> None:
     with db_cursor() as cur:
-        cur.executemany(
-            "INSERT OR IGNORE INTO users(user_id) VALUES (?)",
-            [(str(u),) for u in user_ids],
-        )
+        cur.executemany("INSERT OR IGNORE INTO users(user_id) VALUES (?)", [(str(u),) for u in user_ids])
+
+
+def validate_movies(df_movies: pd.DataFrame) -> pd.DataFrame:
+    if "item_id" not in df_movies.columns:
+        raise ValueError("Movies file must contain item_id column")
+    safe = df_movies.copy()
+
+    if safe["item_id"].isna().any():
+        raise ValueError("item_id cannot be missing")
+
+    safe["item_id"] = safe["item_id"].astype(str).str.strip()
+    if safe["item_id"].eq("").any():
+        raise ValueError("item_id cannot be empty")
+
+    lowered = safe["item_id"].str.lower()
+    if lowered.isin({"nan", "none", "null"}).any():
+        raise ValueError("item_id cannot be missing")
+
+    if "year" in safe.columns:
+        safe["year"] = pd.to_numeric(safe["year"], errors="coerce")
+    return safe
 
 
 def upsert_movies(df_movies: pd.DataFrame) -> None:
     cols = ["item_id", "title", "genres", "description", "tags", "year"]
-    safe = df_movies.copy()
+    safe = validate_movies(df_movies)
     for col in cols:
         if col not in safe.columns:
             safe[col] = None
@@ -119,13 +133,17 @@ def upsert_ratings(df_ratings: pd.DataFrame) -> None:
         raise ValueError(f"Missing required columns: {missing}")
 
     safe = df_ratings.copy()
+    safe["rating"] = pd.to_numeric(safe["rating"], errors="coerce")
+    safe = safe.dropna(subset=["user_id", "item_id", "rating"])
+    safe = safe[(safe["rating"] >= RATING_SCALE_MIN) & (safe["rating"] <= RATING_SCALE_MAX)]
+    if safe.empty:
+        raise ValueError("No valid ratings remain after validation")
+
     if "timestamp" not in safe.columns:
         safe["timestamp"] = None
     upsert_users(safe["user_id"].astype(str).unique())
 
-    records = list(
-        safe[["user_id", "item_id", "rating", "timestamp"]].itertuples(index=False, name=None)
-    )
+    records = list(safe[["user_id", "item_id", "rating", "timestamp"]].itertuples(index=False, name=None))
     with db_cursor() as cur:
         cur.executemany(
             """
