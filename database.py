@@ -85,18 +85,9 @@ def validate_movies(df_movies: pd.DataFrame) -> pd.DataFrame:
     if "item_id" not in df_movies.columns:
         raise ValueError("Movies file must contain item_id column")
     safe = df_movies.copy()
-
-    if safe["item_id"].isna().any():
-        raise ValueError("item_id cannot be missing")
-
-    safe["item_id"] = safe["item_id"].astype(str).str.strip()
-    if safe["item_id"].eq("").any():
+    safe["item_id"] = safe["item_id"].astype(str)
+    if safe["item_id"].str.strip().eq("").any():
         raise ValueError("item_id cannot be empty")
-
-    lowered = safe["item_id"].str.lower()
-    if lowered.isin({"nan", "none", "null"}).any():
-        raise ValueError("item_id cannot be missing")
-
     if "year" in safe.columns:
         safe["year"] = pd.to_numeric(safe["year"], errors="coerce")
     return safe
